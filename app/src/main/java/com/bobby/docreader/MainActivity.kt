@@ -233,7 +233,7 @@ class DocumentAdapter(
 
         if (height != null && height > 0) {
             val percent = (pos.toFloat() / height * 100).toInt().coerceIn(0, 100)
-            //holder.progress.text = "$percent% read"
+            holder.progress.text = "$percent% read"
             holder.progress.isVisible = true
         } else {
             holder.progress.isVisible = false
