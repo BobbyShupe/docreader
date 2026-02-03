@@ -27,16 +27,15 @@ class MainActivity : AppCompatActivity() {
 
     private val TAG = "MainActivity"
 
-    private val pickDocument = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+    private val pickDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         uri ?: return@registerForActivityResult
 
-        val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        // 1. Take persistable permission immediately
+        val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION
         try {
             contentResolver.takePersistableUriPermission(uri, takeFlags)
         } catch (e: SecurityException) {
-            Log.w(TAG, "Could not take persistable permission", e)
-            // Continue anyway (temporary read still works)
+            Log.e(TAG, "Failed to take persistable permission", e)
         }
 
         val defaultName = getFileName(uri) ?: "Document ${System.currentTimeMillis()}"
@@ -75,7 +74,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         addBtn.setOnClickListener {
-            pickDocument.launch("*/*")
+            pickDocument.launch(arrayOf("*/*")) // OpenDocument requires an array of MIME types
         }
         root.addView(addBtn)
 
@@ -233,7 +232,7 @@ class DocumentAdapter(
 
         if (height != null && height > 0) {
             val percent = (pos.toFloat() / height * 100).toInt().coerceIn(0, 100)
-            holder.progress.text = "$percent% read"
+            //holder.progress.text = "$percent% read"
             holder.progress.isVisible = true
         } else {
             holder.progress.isVisible = false
