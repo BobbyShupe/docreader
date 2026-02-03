@@ -2,10 +2,12 @@ package com.bobby.docreader
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -38,13 +40,30 @@ class ReaderActivity : AppCompatActivity() {
 
     private val TAG = "ReaderActivity"
 
+    // Green-on-black colors
+    private val BG = Color.BLACK
+    private val TEXT = Color.parseColor("#00FF41")  // bright green
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         store = DocumentStore(this)
 
-        val uriString = intent.getStringExtra(KEY_URI) ?: return finish()
-        val uri = Uri.parse(uriString)
+        val uriString = intent.getStringExtra(KEY_URI)
+        if (uriString.isNullOrBlank()) {
+            Log.e(TAG, "No URI provided")
+            finish()
+            return
+        }
+
+        val uri = try {
+            Uri.parse(uriString)
+        } catch (e: Exception) {
+            Log.e(TAG, "Invalid URI: $uriString", e)
+            finish()
+            return
+        }
+
         currentUri = uri
         val name = intent.getStringExtra(KEY_NAME) ?: "Document"
 
@@ -54,12 +73,15 @@ class ReaderActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT
             )
+            setBackgroundColor(BG)
         }
 
         val title = MaterialTextView(this).apply {
             text = name
             textSize = 24f
             setPadding(24, 32, 24, 16)
+            setTextColor(TEXT)
+            setBackgroundColor(BG)
         }
         root.addView(title)
 
@@ -69,6 +91,7 @@ class ReaderActivity : AppCompatActivity() {
                 0,
                 1f
             )
+            setBackgroundColor(BG)
         }
         root.addView(scrollView)
 
@@ -77,6 +100,7 @@ class ReaderActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
+            setBackgroundColor(BG)
         }
         scrollView?.addView(hScrollView)
 
@@ -85,6 +109,10 @@ class ReaderActivity : AppCompatActivity() {
             setPadding(24, 16, 24, 80)
             movementMethod = android.text.method.ScrollingMovementMethod()
             isHorizontalScrollBarEnabled = true
+            setBackgroundColor(BG)
+            setTextColor(TEXT)
+            setLinkTextColor(TEXT)
+            setTextIsSelectable(true)
         }
         hScrollView?.addView(textContent)
 
@@ -94,6 +122,8 @@ class ReaderActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT
             )
             visibility = View.GONE
+            setBackgroundColor(BG)
+
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
@@ -109,8 +139,12 @@ class ReaderActivity : AppCompatActivity() {
                 setSupportZoom(true)
                 cacheMode = android.webkit.WebSettings.LOAD_CACHE_ELSE_NETWORK
             }
+
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): Boolean {
                     request?.url?.let { url ->
                         if (url.scheme == "http" || url.scheme == "https") {
                             startActivity(Intent(Intent.ACTION_VIEW, url))
@@ -122,22 +156,56 @@ class ReaderActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    Log.d(TAG, "onPageFinished called for $url")
+                    Log.d(TAG, "onPageFinished: $url")
+
+                    view?.evaluateJavascript(
+                        """
+                        (function() {
+                            var style = document.createElement('style');
+                            style.innerHTML = `
+                                html, body {
+                                    background: #000000 !important;
+                                    color: #00FF41 !important;
+                                    margin: 0;
+                                    padding: 16px;
+                                    font-family: monospace;
+                                }
+                                body * {
+                                    background: transparent !important;
+                                    color: #00FF41 !important;
+                                }
+                                p, div, span, h1, h2, h3, h4, h5, h6, li, td, th {
+                                    color: #00FF41 !important;
+                                }
+                                a {
+                                    color: #00CC00 !important;
+                                }
+                            `;
+                            document.head.appendChild(style);
+                        })();
+                    """.trimIndent(), null
+                    )
+
                     restoreWebViewState()
                     saveTotalHeightIfNeeded()
                 }
-            }
 
-            // Track max scroll aggressively
-            viewTreeObserver.addOnScrollChangedListener {
-                if (visibility == View.VISIBLE) {
-                    val currentY = scrollY
-                    if (currentY > maxObservedScrollY) {
-                        maxObservedScrollY = currentY
-                        Log.d(TAG, "Scroll changed - new maxObservedScrollY: $maxObservedScrollY")
-                        // Save updated height on every significant scroll change
-                        saveTotalHeightIfNeeded()
-                    }
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    Log.e(TAG, "WebView error: ${error?.description} (code: ${error?.errorCode})")
+                    textContent?.text =
+                        "HTML failed to load: ${error?.description ?: "Unknown"}\n\nRaw content:\n" + try {
+                            contentResolver.openInputStream(currentUri!!)?.bufferedReader()
+                                ?.use { it.readText() }
+                        } catch (e: Exception) {
+                            "Cannot read file"
+                        }
+                    textContent?.isVisible = true
+                    webView?.isVisible = false
                 }
             }
         }
@@ -154,6 +222,8 @@ class ReaderActivity : AppCompatActivity() {
         val fileNameLower = uri.lastPathSegment?.lowercase() ?: ""
         val mimeType = URLConnection.guessContentTypeFromName(fileNameLower) ?: "text/plain"
 
+        val isMht = fileNameLower.endsWith(".mht") || fileNameLower.endsWith(".mhtml")
+
         val hasHtmlExtension = fileNameLower.contains(".htm") || fileNameLower.contains(".html")
         val looksLikeHtml = contentResolver.openInputStream(uri)?.use { input ->
             val buffer = ByteArray(1024)
@@ -161,21 +231,38 @@ class ReaderActivity : AppCompatActivity() {
             if (bytesRead > 50) {
                 val start = String(buffer, 0, bytesRead, Charsets.UTF_8).trim().lowercase()
                 start.startsWith("<!doctype html") ||
-                        start.startsWith("<html") ||
-                        start.contains("<head>") ||
-                        start.contains("<body>") ||
-                        start.contains("<title>") ||
-                        start.contains("<meta ") ||
-                        start.contains("<!doctype ")
+                        start.startsWith("<html")
             } else false
         } ?: false
 
-        val useWebView = hasHtmlExtension || looksLikeHtml || mimeType.startsWith("text/html")
+        val useWebView =
+            (hasHtmlExtension || looksLikeHtml || mimeType.startsWith("text/html")) && !isMht
 
-        Log.d(TAG, "Loading file: $fileNameLower | mime: $mimeType | useWebView: $useWebView")
+        Log.d(
+            TAG,
+            "Loading file: $fileNameLower | mime: $mimeType | useWebView: $useWebView | isMht: $isMht"
+        )
 
         withContext(Dispatchers.Main) {
-            if (useWebView) {
+            if (isMht) {
+                val extractedHtml = extractHtmlFromMht(uri)
+                if (extractedHtml != null) {
+                    textContent?.isVisible = false
+                    scrollView?.isVisible = false
+                    webView?.isVisible = true
+                    webView?.loadDataWithBaseURL(null, extractedHtml, "text/html", "UTF-8", null)
+                } else {
+                    textContent?.text =
+                        "Could not extract HTML from .mht file.\n\nRaw content:\n" + try {
+                            contentResolver.openInputStream(uri)?.bufferedReader()
+                                ?.use { it.readText() }
+                        } catch (e: Exception) {
+                            "Cannot read"
+                        }
+                    textContent?.isVisible = true
+                    webView?.isVisible = false
+                }
+            } else if (useWebView) {
                 textContent?.isVisible = false
                 scrollView?.isVisible = false
                 webView?.isVisible = true
@@ -217,39 +304,23 @@ class ReaderActivity : AppCompatActivity() {
     private fun saveTotalHeightIfNeeded() {
         currentUri?.let { uri ->
             webView?.postDelayed({
-                if (webView?.visibility != View.VISIBLE) return@postDelayed
+                val visibleHeight = webView?.height ?: 0
+                val currentScroll = webView?.scrollY ?: 0
+                val currentMax = maxObservedScrollY.coerceAtLeast(currentScroll)
 
-                val view = webView ?: return@postDelayed
+                val estimatedTotal = currentMax + visibleHeight + 800
 
-                // ────────────────────────────────────────────────
-                // Most accurate for WebView in most cases
-                val realContentHeight = view.contentHeight          // in CSS pixels
-                val scale = view.scale                              // zoom factor
-                val totalHeightInPixels = (realContentHeight * scale).toInt()
+                Log.d(
+                    TAG,
+                    "saveTotalHeightIfNeeded - currentScroll=$currentScroll, maxObserved=$currentMax, visibleHeight=$visibleHeight, estimatedTotal=$estimatedTotal"
+                )
 
-                val visibleHeight = view.height
-                val currentScroll = view.scrollY
-
-                // Only save if we have meaningful data
-                if (totalHeightInPixels > visibleHeight * 1.2 && totalHeightInPixels > 300) {
-                    val previous = lastSavedHeight
-                    if (totalHeightInPixels > previous + 300 || previous < 500) {
-                        store.saveTotalHeight(uri, totalHeightInPixels)
-                        lastSavedHeight = totalHeightInPixels
-                        Log.d(TAG, "Saved accurate WebView height: $totalHeightInPixels px (was $previous)")
-                    }
+                if (estimatedTotal > lastSavedHeight + 500 || lastSavedHeight == 0) {
+                    store.saveTotalHeight(uri, estimatedTotal)
+                    lastSavedHeight = estimatedTotal
+                    Log.d(TAG, "Saved new total height: $estimatedTotal for $uri")
                 }
-
-                // Also keep maxObserved as fallback/secondary check
-                val estimated = maxObservedScrollY.coerceAtLeast(currentScroll) + visibleHeight + 400
-                if (estimated > totalHeightInPixels + 200) {
-                    // rare case — content grew after first measurement
-                    store.saveTotalHeight(uri, estimated)
-                    lastSavedHeight = estimated
-                    Log.d(TAG, "Fallback save - estimated: $estimated")
-                }
-
-            }, 1200)   // give more time for layout/images to settle
+            }, 1000)
         }
     }
 
@@ -286,7 +357,6 @@ class ReaderActivity : AppCompatActivity() {
                     maxObservedScrollY = vPos
                     Log.d(TAG, "onPause - updated maxObservedScrollY to $maxObservedScrollY")
                 }
-                saveTotalHeightIfNeeded()
             } else {
                 vPos = scrollView?.scrollY ?: 0
                 hPos = hScrollView?.scrollX ?: 0
@@ -301,9 +371,6 @@ class ReaderActivity : AppCompatActivity() {
             if (webView?.isVisible == true && zoom != 1.0f) {
                 store.saveZoom(uri, zoom)
             }
-
-            // Save height on pause too
-            saveTotalHeightIfNeeded()
         }
     }
 
@@ -327,5 +394,54 @@ class ReaderActivity : AppCompatActivity() {
                 putExtra(KEY_POSITION, lastPosition)
             })
         }
+    }
+
+    private fun extractHtmlFromMht(uri: Uri): String? {
+        return try {
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                // Reading as text to find the boundary
+                val rawContent = inputStream.bufferedReader(Charsets.UTF_8).readText()
+
+                val boundaryMatch = Regex("""boundary="([^"]+)"""").find(rawContent)
+                val boundary = boundaryMatch?.groupValues?.get(1) ?: return@use null
+
+                val parts = rawContent.split("--$boundary")
+
+                for (part in parts) {
+                    if (part.contains("Content-Type: text/html", ignoreCase = true)) {
+                        val contentStart = part.indexOf("\r\n\r\n")
+                        if (contentStart >= 0) {
+                            val encodedHtml = part.substring(contentStart + 4).trim()
+
+                            // MHT files almost always use quoted-printable encoding
+                            return@use if (part.contains("quoted-printable", ignoreCase = true)) {
+                                decodeQuotedPrintable(encodedHtml)
+                            } else {
+                                encodedHtml
+                            }
+                        }
+                    }
+                }
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract .mht content", e)
+            null
+        }
+    }
+
+    private fun decodeQuotedPrintable(input: String): String {
+        return input
+            // 1. Remove "Soft Line Breaks" (an '=' at the very end of a line)
+            .replace("=\r\n", "")
+            .replace("=\n", "")
+            // 2. Decode Hex characters (like =3D to = or =20 to space)
+            .let { text ->
+                val regex = Regex("=[0-9A-Fa-f]{2}")
+                regex.replace(text) { match ->
+                    val hex = match.value.substring(1)
+                    hex.toInt(16).toChar().toString()
+                }
+            }
     }
 }

@@ -32,7 +32,12 @@ class MainActivity : AppCompatActivity() {
 
         val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        contentResolver.takePersistableUriPermission(uri, takeFlags)
+        try {
+            contentResolver.takePersistableUriPermission(uri, takeFlags)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Could not take persistable permission", e)
+            // Continue anyway (temporary read still works)
+        }
 
         val defaultName = getFileName(uri) ?: "Document ${System.currentTimeMillis()}"
         showNameDialog(uri, defaultName)
