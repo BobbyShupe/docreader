@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Doc Reader</string>
+    <string name="add_document">Add Document</string>
+    <string name="no_documents">No documents added yet</string>
+    <string name="delete">Delete</string>
+    <string name="reading_position_saved">Position saved</string>
+</resources>
