@@ -8,8 +8,10 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -32,9 +34,8 @@ class MainActivity : AppCompatActivity() {
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         contentResolver.takePersistableUriPermission(uri, takeFlags)
 
-        val name = getFileName(uri) ?: "Document ${System.currentTimeMillis()}"
-        store.add(uri, name)
-        refreshList()
+        val defaultName = getFileName(uri) ?: "Document ${System.currentTimeMillis()}"
+        showNameDialog(uri, defaultName)
     }
 
     private var refreshList: () -> Unit = {}
@@ -108,9 +109,6 @@ class MainActivity : AppCompatActivity() {
         refreshList = {
             val items = store.getAll()
             Log.d(TAG, "Refreshing list with ${items.size} items")
-            items.forEach { entry ->
-                Log.d(TAG, "Entry: ${entry.displayName} | pos=${entry.lastPosition} | height=${entry.totalHeight}")
-            }
             adapter.submitList(items)
             emptyView.isVisible = items.isEmpty()
         }
@@ -120,10 +118,25 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Re-refresh list when returning from ReaderActivity
-        // This ensures updated position/height is shown immediately
         refreshList()
-        Log.d(TAG, "onResume - refreshed list")
+    }
+
+    private fun showNameDialog(uri: Uri, defaultName: String) {
+        val editText = EditText(this).apply {
+            setText(defaultName)
+            setSelection(0, defaultName.length)  // select all for easy overwrite
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Name this document")
+            .setView(editText)
+            .setPositiveButton("Add") { _, _ ->
+                val chosenName = editText.text.toString().trim().ifEmpty { defaultName }
+                store.add(uri, chosenName)
+                refreshList()
+            }
+            .setNegativeButton("Cancel") { _, _ -> }
+            .show()
     }
 
     private fun getFileName(uri: Uri): String? {
@@ -217,10 +230,8 @@ class DocumentAdapter(
             val percent = (pos.toFloat() / height * 100).toInt().coerceIn(0, 100)
             //holder.progress.text = "$percent% read"
             holder.progress.isVisible = true
-            Log.d("Adapter", "Showing progress for ${item.displayName}: $percent% (pos=$pos / height=$height)")
         } else {
             holder.progress.isVisible = false
-            Log.d("Adapter", "No progress shown for ${item.displayName} - height=$height, pos=$pos")
         }
 
         holder.openButton.setOnClickListener { onOpen(item) }
