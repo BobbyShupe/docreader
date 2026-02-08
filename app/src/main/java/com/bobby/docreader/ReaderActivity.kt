@@ -6,20 +6,28 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.textview.MaterialTextView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.URLConnection
@@ -32,7 +40,7 @@ class ReaderActivity : AppCompatActivity() {
 
     private var scrollView: ScrollView? = null
     private var hScrollView: HorizontalScrollView? = null
-    private var textContent: MaterialTextView? = null
+    private var textContent: TextView? = null
     private var webView: WebView? = null
 
     private var maxObservedScrollY = 0
@@ -41,8 +49,22 @@ class ReaderActivity : AppCompatActivity() {
     private val TAG = "ReaderActivity"
 
     // Green-on-black colors
-    private val BG = Color.BLACK
-    private val TEXT = Color.parseColor("#00FF41")  // bright green
+    private val BACKGROUND_COLOR = Color.BLACK
+    private val TEXT_COLOR = Color.parseColor("#00FF41")
+
+    // RSVP state and UI
+    private var rsvpOverlay: FrameLayout? = null
+    private var rsvpWordView: TextView? = null
+    private var rsvpSpeedSlider: SeekBar? = null
+    private var rsvpPauseButton: MaterialButton? = null
+    private var rsvpJob: Job? = null
+    private var isRsvpRunning = false
+    private var currentWpm = 400
+
+    // Remember state before RSVP
+    private var wasUsingWebViewBeforeRsvp = false
+    private var wordsBeforeRsvp: List<String> = emptyList()
+    private var currentWordIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,7 +81,7 @@ class ReaderActivity : AppCompatActivity() {
         val uri = try {
             Uri.parse(uriString)
         } catch (e: Exception) {
-            Log.e(TAG, "Invalid URI: $uriString", e)
+            Log.e(TAG, "Failed to parse URI: $uriString", e)
             finish()
             return
         }
@@ -67,23 +89,31 @@ class ReaderActivity : AppCompatActivity() {
         currentUri = uri
         val name = intent.getStringExtra(KEY_NAME) ?: "Document"
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT
+        val root = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
-            setBackgroundColor(BG)
+            setBackgroundColor(BACKGROUND_COLOR)
         }
+
+        val contentLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        root.addView(contentLayout)
 
         val title = MaterialTextView(this).apply {
             text = name
             textSize = 24f
             setPadding(24, 32, 24, 16)
-            setTextColor(TEXT)
-            setBackgroundColor(BG)
+            setTextColor(TEXT_COLOR)
+            setBackgroundColor(BACKGROUND_COLOR)
         }
-        root.addView(title)
+        contentLayout.addView(title)
 
         scrollView = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -91,16 +121,16 @@ class ReaderActivity : AppCompatActivity() {
                 0,
                 1f
             )
-            setBackgroundColor(BG)
+            setBackgroundColor(BACKGROUND_COLOR)
         }
-        root.addView(scrollView)
+        contentLayout.addView(scrollView)
 
         hScrollView = HorizontalScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            setBackgroundColor(BG)
+            setBackgroundColor(BACKGROUND_COLOR)
         }
         scrollView?.addView(hScrollView)
 
@@ -109,9 +139,9 @@ class ReaderActivity : AppCompatActivity() {
             setPadding(24, 16, 24, 80)
             movementMethod = android.text.method.ScrollingMovementMethod()
             isHorizontalScrollBarEnabled = true
-            setBackgroundColor(BG)
-            setTextColor(TEXT)
-            setLinkTextColor(TEXT)
+            setBackgroundColor(BACKGROUND_COLOR)
+            setTextColor(TEXT_COLOR)
+            setLinkTextColor(TEXT_COLOR)
             setTextIsSelectable(true)
         }
         hScrollView?.addView(textContent)
@@ -122,7 +152,7 @@ class ReaderActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT
             )
             visibility = View.GONE
-            setBackgroundColor(BG)
+            setBackgroundColor(BACKGROUND_COLOR)
 
             settings.apply {
                 javaScriptEnabled = true
@@ -141,10 +171,7 @@ class ReaderActivity : AppCompatActivity() {
             }
 
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(
-                    view: WebView?,
-                    request: WebResourceRequest?
-                ): Boolean {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     request?.url?.let { url ->
                         if (url.scheme == "http" || url.scheme == "https") {
                             startActivity(Intent(Intent.ACTION_VIEW, url))
@@ -158,8 +185,7 @@ class ReaderActivity : AppCompatActivity() {
                     super.onPageFinished(view, url)
                     Log.d(TAG, "onPageFinished: $url")
 
-                    view?.evaluateJavascript(
-                        """
+                    view?.evaluateJavascript("""
                         (function() {
                             var style = document.createElement('style');
                             style.innerHTML = `
@@ -183,8 +209,7 @@ class ReaderActivity : AppCompatActivity() {
                             `;
                             document.head.appendChild(style);
                         })();
-                    """.trimIndent(), null
-                    )
+                    """.trimIndent(), null)
 
                     restoreWebViewState()
                     saveTotalHeightIfNeeded()
@@ -197,32 +222,272 @@ class ReaderActivity : AppCompatActivity() {
                 ) {
                     super.onReceivedError(view, request, error)
                     Log.e(TAG, "WebView error: ${error?.description} (code: ${error?.errorCode})")
-                    textContent?.text =
-                        "HTML failed to load: ${error?.description ?: "Unknown"}\n\nRaw content:\n" + try {
-                            contentResolver.openInputStream(currentUri!!)?.bufferedReader()
-                                ?.use { it.readText() }
-                        } catch (e: Exception) {
-                            "Cannot read file"
-                        }
+                    currentUri?.let { safeUri ->
+                        textContent?.text = "Failed to load: ${error?.description ?: "Unknown"}\n\nRaw content:\n" + try {
+                            contentResolver.openInputStream(safeUri)?.bufferedReader()?.use { it.readText() }
+                                ?: "Cannot read file"
+                        } catch (ex: Exception) { "Error reading file: ${ex.message}" }
+                    } ?: run {
+                        textContent?.text = "Failed to load: ${error?.description ?: "Unknown"}\n(No URI available)"
+                    }
                     textContent?.isVisible = true
                     webView?.isVisible = false
                 }
             }
         }
-        root.addView(webView)
+        contentLayout.addView(webView)
+
+        // RSVP overlay
+// RSVP overlay (full-screen word display)
+        rsvpOverlay = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(BACKGROUND_COLOR)
+            visibility = View.GONE
+
+            rsvpWordView = TextView(this@ReaderActivity).apply {
+                textSize = 80f
+                setTextColor(TEXT_COLOR)
+                gravity = Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            }
+            addView(rsvpWordView)
+
+            // Speed slider - moved higher up
+            rsvpSpeedSlider = SeekBar(this@ReaderActivity).apply {
+                max = 1000
+                progress = currentWpm - 200
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    bottomMargin = 120   // ← increased from 120 to avoid overlap
+                    leftMargin = 20
+                    rightMargin = 20
+                }
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        currentWpm = 200 + progress
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }
+            addView(rsvpSpeedSlider)
+
+            // Pause button - moved to left side
+            rsvpPauseButton = MaterialButton(this@ReaderActivity).apply {
+                text = "Pause"
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.BOTTOM or Gravity.START
+                    bottomMargin = 180   // aligned with slider height
+                    leftMargin = 20
+                }
+                setOnClickListener {
+                    if (rsvpJob?.isActive == true) {
+                        rsvpJob?.cancel()
+                        text = "Resume"
+                    } else {
+                        startRsvp()
+                        text = "Pause"
+                    }
+                }
+            }
+            addView(rsvpPauseButton)
+        }
+        root.addView(rsvpOverlay)
+
+// Floating RSVP trigger button - also moved up slightly for consistency
+        val rsvpButton = MaterialButton(this).apply {
+            text = "RSVP"
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                bottomMargin = 180   // ← increased from 40 to match the overlay elements
+                rightMargin = 40
+            }
+            elevation = 8f
+            setBackgroundColor(Color.parseColor("#006400"))
+            setOnClickListener {
+                Log.d(TAG, "RSVP button clicked")
+                toggleRsvp()
+            }
+        }
+        root.addView(rsvpButton)
 
         setContentView(root)
 
         CoroutineScope(Dispatchers.Main).launch {
             loadContent(uri)
         }
+
+        rsvpOverlay?.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                exitRsvp()
+                true
+            } else false
+        }
+    }
+
+    private fun toggleRsvp() {
+        if (isRsvpRunning) {
+            exitRsvp()
+        } else {
+            startRsvp()
+        }
+    }
+
+    private fun startRsvp() {
+        if (isRsvpRunning) return
+        isRsvpRunning = true
+
+        // Remember current mode and scroll position
+        wasUsingWebViewBeforeRsvp = webView?.isVisible == true
+
+        val currentScrollY = if (wasUsingWebViewBeforeRsvp) {
+            webView?.scrollY ?: 0
+        } else {
+            scrollView?.scrollY ?: 0
+        }
+
+        val totalHeight = if (wasUsingWebViewBeforeRsvp) {
+            lastSavedHeight.coerceAtLeast(webView?.contentHeight ?: 1000)
+        } else {
+            textContent?.layout?.height ?: 1000
+        }
+
+        val progress = if (totalHeight > 0) currentScrollY.toFloat() / totalHeight else 0f
+        Log.d(TAG, "RSVP start - scrollY: $currentScrollY / totalHeight: $totalHeight, progress: $progress")
+
+        rsvpOverlay?.isVisible = true
+        rsvpPauseButton?.text = "Pause"
+
+        CoroutineScope(Dispatchers.Main).launch {
+            var fullText: String
+
+            if (wasUsingWebViewBeforeRsvp) {
+                Log.d(TAG, "Switching to text mode for RSVP (raw HTML source)")
+                fullText = withContext(Dispatchers.IO) {
+                    try {
+                        contentResolver.openInputStream(currentUri!!)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                            ?: "No content available"
+                    } catch (e: Exception) {
+                        "Error reading raw file: ${e.message}"
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    webView?.isVisible = false
+                    textContent?.isVisible = true
+                    scrollView?.isVisible = true
+                    textContent?.text = fullText
+                    Log.d(TAG, "Raw HTML loaded into text view (length ${fullText.length})")
+                }
+
+                delay(800)
+            } else {
+                fullText = textContent?.text?.toString() ?: "No readable text available"
+            }
+
+            val cleanText = cleanHtmlForReading(fullText)
+
+            if (cleanText.trim().isEmpty()) {
+                rsvpWordView?.text = "No readable text detected\n\nDocument may be mostly tables/images.\nTry scrolling or normal view."
+                delay(5000)
+                exitRsvp()
+                return@launch
+            }
+
+            val words = cleanText.split(Regex("\\s+")).filter { it.isNotBlank() }
+            val startIndex = (words.size * progress).toInt().coerceIn(0, words.size - 1)
+
+            Log.d(TAG, "RSVP starting from word index $startIndex / ${words.size}")
+
+            wordsBeforeRsvp = words
+            currentWordIndex = startIndex
+
+            rsvpJob = CoroutineScope(Dispatchers.Main).launch {
+                words.drop(startIndex).forEachIndexed { index, word ->
+                    if (!isActive) return@launch
+                    rsvpWordView?.text = word
+                    currentWordIndex = startIndex + index + 1
+                    delay(60000L / currentWpm)
+                }
+                exitRsvp()
+            }
+        }
+    }
+
+    private fun exitRsvp() {
+        isRsvpRunning = false
+        rsvpJob?.cancel()
+        rsvpOverlay?.isVisible = false
+        rsvpWordView?.text = ""
+
+        // Restore original view mode
+        if (wasUsingWebViewBeforeRsvp) {
+            Log.d(TAG, "Restoring WebView mode after RSVP")
+            textContent?.isVisible = false
+            scrollView?.isVisible = false
+            webView?.isVisible = true
+
+            // Update scroll position based on reading progress
+            val words = wordsBeforeRsvp
+            if (words.isNotEmpty() && currentWordIndex > 0) {
+                val progress = currentWordIndex.toFloat() / words.size
+                val totalHeight = webView?.contentHeight ?: 1000
+                val targetScrollY = (progress * totalHeight).toInt().coerceIn(0, totalHeight)
+
+                webView?.post {
+                    webView?.scrollTo(0, targetScrollY)
+                    Log.d(TAG, "Restored WebView scroll to ≈ $targetScrollY (progress $progress)")
+                }
+            }
+        } else {
+            Log.d(TAG, "Keeping text mode after RSVP - updating scroll")
+            val words = wordsBeforeRsvp
+            if (words.isNotEmpty() && currentWordIndex > 0) {
+                val progress = currentWordIndex.toFloat() / words.size
+                val totalHeight = textContent?.layout?.height ?: 1000
+                val targetScrollY = (progress * totalHeight).toInt().coerceIn(0, totalHeight)
+
+                scrollView?.post {
+                    scrollView?.scrollTo(0, targetScrollY)
+                    Log.d(TAG, "Restored text view scroll to ≈ $targetScrollY (progress $progress)")
+                }
+            }
+        }
+
+        // Reset tracking
+        wordsBeforeRsvp = emptyList()
+        currentWordIndex = 0
+    }
+
+    private fun cleanHtmlForReading(raw: String): String {
+        var text = raw
+            .replace(Regex("(?s)<script.*?</script>"), "")
+            .replace(Regex("(?s)<style.*?</style>"), "")
+            .replace(Regex("(?s)<!--.*?-->"), "")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return text
     }
 
     private suspend fun loadContent(uri: Uri) = withContext(Dispatchers.IO) {
         val fileNameLower = uri.lastPathSegment?.lowercase() ?: ""
         val mimeType = URLConnection.guessContentTypeFromName(fileNameLower) ?: "text/plain"
-
-        val isMht = fileNameLower.endsWith(".mht") || fileNameLower.endsWith(".mhtml")
 
         val hasHtmlExtension = fileNameLower.contains(".htm") || fileNameLower.contains(".html")
         val looksLikeHtml = contentResolver.openInputStream(uri)?.use { input ->
@@ -231,74 +496,67 @@ class ReaderActivity : AppCompatActivity() {
             if (bytesRead > 50) {
                 val start = String(buffer, 0, bytesRead, Charsets.UTF_8).trim().lowercase()
                 start.startsWith("<!doctype html") ||
-                        start.startsWith("<html")
+                        start.startsWith("<html") ||
+                        start.contains("<head>") ||
+                        start.contains("<body>") ||
+                        start.contains("<title>") ||
+                        start.contains("<meta ") ||
+                        start.contains("<!doctype ")
             } else false
         } ?: false
 
-        val useWebView =
-            (hasHtmlExtension || looksLikeHtml || mimeType.startsWith("text/html")) && !isMht
+        val useWebView = hasHtmlExtension || looksLikeHtml || mimeType.startsWith("text/html")
 
-        Log.d(
-            TAG,
-            "Loading file: $fileNameLower | mime: $mimeType | useWebView: $useWebView | isMht: $isMht"
-        )
+        Log.d(TAG, "Loading file: $fileNameLower | mime: $mimeType | useWebView: $useWebView")
 
         withContext(Dispatchers.Main) {
-            if (isMht) {
-                val extractedHtml = extractHtmlFromMht(uri)
-                if (extractedHtml != null) {
-                    textContent?.isVisible = false
-                    scrollView?.isVisible = false
-                    webView?.isVisible = true
-                    webView?.loadDataWithBaseURL(null, extractedHtml, "text/html", "UTF-8", null)
-                } else {
-                    textContent?.text =
-                        "Could not extract HTML from .mht file.\n\nRaw content:\n" + try {
-                            contentResolver.openInputStream(uri)?.bufferedReader()
-                                ?.use { it.readText() }
-                        } catch (e: Exception) {
-                            "Cannot read"
-                        }
-                    textContent?.isVisible = true
-                    webView?.isVisible = false
-                }
-            } else if (useWebView) {
+            if (useWebView) {
                 textContent?.isVisible = false
                 scrollView?.isVisible = false
                 webView?.isVisible = true
-                webView?.loadUrl(uri.toString())
+                try {
+                    webView?.loadUrl(uri.toString())
+                } catch (e: Exception) {
+                    Log.e(TAG, "WebView loadUrl failed", e)
+                    fallbackToRawText(uri)
+                }
                 maxObservedScrollY = 0
             } else {
-                val text = try {
-                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                        ?: "Cannot open file"
-                } catch (e: Exception) {
-                    "Error reading file: ${e.message}"
-                }
-
-                webView?.isVisible = false
-                textContent?.isVisible = true
-                scrollView?.isVisible = true
-                textContent?.text = text
-
-                val savedPos = store.getPosition(uri)
-                val savedHPos = store.getHorizontalPosition(uri)
-                if (savedPos > 0 || savedHPos > 0) {
-                    scrollView?.post {
-                        if (savedPos > 0) scrollView?.scrollTo(0, savedPos)
-                        if (savedHPos > 0) hScrollView?.scrollTo(savedHPos, 0)
-                    }
-                }
-
-                textContent?.postDelayed({
-                    val totalH = textContent?.layout?.height ?: 0
-                    Log.d(TAG, "Text mode total height: $totalH")
-                    if (totalH > 100) {
-                        store.saveTotalHeight(uri, totalH)
-                    }
-                }, 800)
+                fallbackToRawText(uri)
             }
         }
+    }
+
+    private fun fallbackToRawText(uri: Uri) {
+        val text = try {
+            contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                ?: "Cannot open file"
+        } catch (e: Exception) {
+            Log.e(TAG, "Text fallback error", e)
+            "Error reading file: ${e.message}"
+        }
+
+        webView?.isVisible = false
+        textContent?.isVisible = true
+        scrollView?.isVisible = true
+        textContent?.text = text
+
+        val savedPos = store.getPosition(uri)
+        val savedHPos = store.getHorizontalPosition(uri)
+        if (savedPos > 0 || savedHPos > 0) {
+            scrollView?.post {
+                if (savedPos > 0) scrollView?.scrollTo(0, savedPos)
+                if (savedHPos > 0) hScrollView?.scrollTo(savedHPos, 0)
+            }
+        }
+
+        textContent?.postDelayed({
+            val totalH = textContent?.layout?.height ?: 0
+            Log.d(TAG, "Text mode total height: $totalH")
+            if (totalH > 100) {
+                store.saveTotalHeight(uri, totalH)
+            }
+        }, 800)
     }
 
     private fun saveTotalHeightIfNeeded() {
@@ -310,10 +568,7 @@ class ReaderActivity : AppCompatActivity() {
 
                 val estimatedTotal = currentMax + visibleHeight + 800
 
-                Log.d(
-                    TAG,
-                    "saveTotalHeightIfNeeded - currentScroll=$currentScroll, maxObserved=$currentMax, visibleHeight=$visibleHeight, estimatedTotal=$estimatedTotal"
-                )
+                Log.d(TAG, "saveTotalHeightIfNeeded - currentScroll=$currentScroll, maxObserved=$currentMax, visibleHeight=$visibleHeight, estimatedTotal=$estimatedTotal")
 
                 if (estimatedTotal > lastSavedHeight + 500 || lastSavedHeight == 0) {
                     store.saveTotalHeight(uri, estimatedTotal)
@@ -321,7 +576,7 @@ class ReaderActivity : AppCompatActivity() {
                     Log.d(TAG, "Saved new total height: $estimatedTotal for $uri")
                 }
             }, 1000)
-        }
+        } ?: Log.w(TAG, "Cannot save height: currentUri is null")
     }
 
     private fun restoreWebViewState() {
@@ -338,7 +593,7 @@ class ReaderActivity : AppCompatActivity() {
                     webView?.scrollTo(savedHScroll, savedVScroll)
                 }
             }, 800)
-        }
+        } ?: Log.w(TAG, "Cannot restore state: currentUri is null")
     }
 
     override fun onPause() {
@@ -371,11 +626,13 @@ class ReaderActivity : AppCompatActivity() {
             if (webView?.isVisible == true && zoom != 1.0f) {
                 store.saveZoom(uri, zoom)
             }
-        }
+        } ?: Log.w(TAG, "onPause: currentUri is null - no position saved")
     }
 
     override fun onBackPressed() {
-        if (webView?.canGoBack() == true) {
+        if (isRsvpRunning) {
+            exitRsvp()
+        } else if (webView?.canGoBack() == true) {
             webView?.goBack()
         } else {
             super.onBackPressed()
@@ -394,54 +651,5 @@ class ReaderActivity : AppCompatActivity() {
                 putExtra(KEY_POSITION, lastPosition)
             })
         }
-    }
-
-    private fun extractHtmlFromMht(uri: Uri): String? {
-        return try {
-            contentResolver.openInputStream(uri)?.use { inputStream ->
-                // Reading as text to find the boundary
-                val rawContent = inputStream.bufferedReader(Charsets.UTF_8).readText()
-
-                val boundaryMatch = Regex("""boundary="([^"]+)"""").find(rawContent)
-                val boundary = boundaryMatch?.groupValues?.get(1) ?: return@use null
-
-                val parts = rawContent.split("--$boundary")
-
-                for (part in parts) {
-                    if (part.contains("Content-Type: text/html", ignoreCase = true)) {
-                        val contentStart = part.indexOf("\r\n\r\n")
-                        if (contentStart >= 0) {
-                            val encodedHtml = part.substring(contentStart + 4).trim()
-
-                            // MHT files almost always use quoted-printable encoding
-                            return@use if (part.contains("quoted-printable", ignoreCase = true)) {
-                                decodeQuotedPrintable(encodedHtml)
-                            } else {
-                                encodedHtml
-                            }
-                        }
-                    }
-                }
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract .mht content", e)
-            null
-        }
-    }
-
-    private fun decodeQuotedPrintable(input: String): String {
-        return input
-            // 1. Remove "Soft Line Breaks" (an '=' at the very end of a line)
-            .replace("=\r\n", "")
-            .replace("=\n", "")
-            // 2. Decode Hex characters (like =3D to = or =20 to space)
-            .let { text ->
-                val regex = Regex("=[0-9A-Fa-f]{2}")
-                regex.replace(text) { match ->
-                    val hex = match.value.substring(1)
-                    hex.toInt(16).toChar().toString()
-                }
-            }
     }
 }
